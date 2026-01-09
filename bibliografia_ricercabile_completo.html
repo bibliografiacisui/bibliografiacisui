@@ -569,7 +569,7 @@
                 }
                 citation += '.';
                 
-            } else if (item.tipologia === "volume miscellaneo") {
+            } else if (item.tipologia === "volume miscellaneo" || item.tipologia === "poligrafia") {
                 // Curatore (a cura di). Titolo. Luogo: Editore, anno.
                 citation += `${item.autore_curatore_volume}`;
                 if (item.precisazione_curatore) {
