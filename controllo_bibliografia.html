@@ -1,0 +1,338 @@
+<!DOCTYPE html>
+<html lang="it">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Controllo bibliografia CISUI</title>
+<style>
+:root{--rosso:#9d2235;--rosso-scuro:#7a1a29;--testo:#222;--grigio:#666;--bordo:#ddd;--sfondo:#f5f5f5;--carta:#fff;--evid:#fff3c4;--ok:#2e7d32}
+*{box-sizing:border-box;margin:0;padding:0}
+body{font-family:Georgia,'Times New Roman',serif;background:var(--sfondo);color:var(--testo);line-height:1.45}
+.container{max-width:1200px;margin:0 auto;background:var(--carta);min-height:100vh;box-shadow:0 2px 8px rgba(0,0,0,.1)}
+.header{background:var(--rosso);color:#fff;padding:20px 30px;border-bottom:3px solid var(--rosso-scuro);display:flex;justify-content:space-between;align-items:center;flex-wrap:wrap;gap:12px}
+.header .centro{font-size:.8em;opacity:.9;letter-spacing:.5px}
+.header h1{font-size:1.5em;font-weight:normal}
+.header a{background:#fff;color:var(--rosso);padding:8px 16px;text-decoration:none;border-radius:4px;font-size:13px;font-weight:600}
+main{padding:24px 30px}
+.intro{color:var(--grigio);font-size:.92em;margin-bottom:18px;max-width:820px}
+.riepilogo{display:flex;gap:12px;flex-wrap:wrap;margin-bottom:20px;align-items:center}
+.pill{border:1px solid var(--bordo);padding:8px 14px;border-radius:4px;font-size:.9em}
+.pill b{color:var(--rosso)}
+button{font-family:inherit;background:var(--rosso);color:#fff;border:0;padding:9px 16px;border-radius:4px;cursor:pointer;font-size:.88em}
+button:hover{background:var(--rosso-scuro)}
+details{border:1px solid var(--bordo);border-left:4px solid var(--rosso);margin-bottom:12px;border-radius:3px}
+details.zero{border-left-color:var(--ok)}
+summary{cursor:pointer;padding:12px 16px;font-size:1.02em;display:flex;justify-content:space-between;gap:12px}
+summary .n{font-weight:bold;color:var(--rosso);white-space:nowrap}
+details.zero summary .n{color:var(--ok)}
+.priorita{font-size:.75em;color:var(--grigio);font-style:italic;margin-left:6px}
+.spiega{padding:0 16px 10px;font-size:.88em;color:var(--grigio)}
+.tab-wrap{overflow-x:auto;padding:0 16px 14px}
+table{border-collapse:collapse;width:100%;font-size:.82em}
+th,td{border-bottom:1px solid #eee;padding:5px 7px;text-align:left;vertical-align:top}
+th{background:#faf7f7;font-weight:600;white-space:nowrap}
+td.riga{font-weight:bold;color:var(--rosso);white-space:nowrap}
+td.diff{background:var(--evid)}
+tr.gruppo td{background:#f3eeee;font-weight:600;font-style:italic;border-top:2px solid var(--bordo)}
+.altro{padding:0 16px 14px;font-size:.85em;color:var(--grigio)}
+.error{padding:20px;border:1px solid var(--rosso);color:var(--rosso)}
+@media (max-width:640px){.header,main{padding:16px}}
+</style>
+</head>
+<body>
+<div class="container">
+  <div class="header">
+    <div><div class="centro">Centro Interuniversitario per la Storia delle Università Italiane</div>
+    <h1>Controllo della bibliografia</h1></div>
+    <a href="bibliografia_ricercabile_completo.html">← Torna alla bibliografia</a>
+  </div>
+  <main>
+    <p class="intro">Questa pagina legge lo stesso file <b>bibliografia_cisui_completo.csv</b> della bibliografia e segnala le righe sospette.
+    I numeri di <b>riga</b> corrispondono alle righe del file Excel. Non tutte le segnalazioni sono errori: sono punti da verificare.
+    Le celle con sfondo giallo sono quelle che si discostano dalle altre dello stesso gruppo: di solito sono quelle da correggere.</p>
+    <div class="riepilogo" id="riepilogo">Caricamento…</div>
+    <div id="controlli"></div>
+  </main>
+</div>
+<script>
+const CSV_FILE = 'bibliografia_cisui_completo.csv';
+const COLONNE = ['tipologia','autore_saggio','precisazione_autore','titolo_saggio','autore_curatore_volume','precisazione_curatore','titolo_volume','luogo','editore','anno','volumi','rivista','annata','fascicolo','pagine'];
+const TIPOLOGIE = ['articolo in rivista','articolo in volume miscellaneo','monografia','poligrafia','volume miscellaneo'];
+const MAX_RIGHE = 300;  // righe mostrate per controllo (il CSV scaricabile le contiene tutte)
+
+        // Accetta sia "CSV UTF-8" sia il CSV "classico" di Excel (accenti codificati Windows/Mac)
+        function decodificaTesto(buffer) {
+            try {
+                return new TextDecoder('utf-8', { fatal: true }).decode(buffer);
+            } catch (e) {
+                return new TextDecoder('windows-1252').decode(buffer);
+            }
+        }
+
+        // Normalizza i nomi delle colonne: "Autore saggio", "precisazione_ autore", "autore o curatore" ecc.
+        function normalizzaIntestazione(h) {
+            let n = h.replace(/^﻿/, '').trim().toLowerCase()
+                     .replace(/\s+o\s+/g, '_').replace(/[\s_]+/g, '_').replace(/^_|_$/g, '');
+            const alias = {
+                'data': 'anno',
+                'autore_curatore': 'autore_curatore_volume',
+                'precisazione_autore_curatore': 'precisazione_curatore',
+                'precisazione_autore_curatore_volume': 'precisazione_curatore'
+            };
+            return alias[n] || n;
+        }
+
+        // Lettore CSV completo: riconosce da solo il separatore (, ; o tabulazione),
+        // gestisce virgolette, "a capo" dentro le celle e fine riga Windows/Mac.
+        function parseCSV(text) {
+            text = text.replace(/^﻿/, '');
+            const primaRiga = text.slice(0, text.search(/\r?\n|$/));
+            const conta = ch => primaRiga.split(ch).length - 1;
+            const sep = [';', '\t', ','].reduce((a, b) => conta(b) > conta(a) ? b : a, ',');
+
+            const righe = [];
+            let riga = [], campo = '', inQuotes = false;
+            for (let i = 0; i < text.length; i++) {
+                const c = text[i];
+                if (inQuotes) {
+                    if (c === '"') {
+                        if (text[i + 1] === '"') { campo += '"'; i++; }
+                        else inQuotes = false;
+                    } else campo += c;
+                } else if (c === '"') inQuotes = true;
+                else if (c === sep) { riga.push(campo); campo = ''; }
+                else if (c === '\n' || c === '\r') {
+                    if (c === '\r' && text[i + 1] === '\n') i++;
+                    riga.push(campo); righe.push(riga); riga = []; campo = '';
+                } else campo += c;
+            }
+            if (campo !== '' || riga.length) { riga.push(campo); righe.push(riga); }
+
+            const intestazioni = (righe.shift() || []).map(normalizzaIntestazione);
+            const mancanti = ['tipologia', 'anno'].filter(c => !intestazioni.includes(c));
+            const dati = [];
+            for (let r = 0; r < righe.length; r++) {
+                const valori = righe[r];
+                if (valori.every(v => v.trim() === '')) continue;
+                const item = { _riga: r + 2 };
+                COLONNE.forEach(c => item[c] = '');
+                intestazioni.forEach((h, k) => {
+                    if (h) item[h] = cleanValue((valori[k] || '').replace(/\s+/g, ' '));
+                });
+                dati.push(item);
+            }
+            return { dati, intestazioni, mancanti };
+        }
+
+        // Rimuove il ".0" che Excel/pandas aggiunge ai numeri (es. "136.0" -> "136")
+        function cleanValue(v) {
+            v = (v || '').trim();
+            return /^\d+\.0$/.test(v) ? v.slice(0, -2) : v;
+        }
+
+
+const esc = s => String(s ?? '').replace(/[&<>"]/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c]));
+const spazi = s => (s || '').replace(/\s+/g, ' ').trim();
+const chiave = s => spazi(s).toLowerCase().normalize('NFD').replace(/[̀-ͯ]/g, '').replace(/[^a-z0-9]/g, '');
+const chiaveNome = s => s.toLowerCase().normalize('NFD').replace(/[̀-ͯ]/g, '').replace(/[^a-z]/g, '');
+const titoloDi = it => it.titolo_saggio || it.titolo_volume;
+const autoreDi = it => it.autore_saggio || it.autore_curatore_volume;
+const sedeDi = it => it.tipologia === 'articolo in rivista' ? it.rivista : it.titolo_volume;
+
+function raggruppa(arr, fn) {
+  const m = new Map();
+  for (const x of arr) { const k = fn(x); if (!k) continue; if (!m.has(k)) m.set(k, []); m.get(k).push(x); }
+  return m;
+}
+
+// Differenza di al massimo una lettera (refusi tipo Pecorai/Pecorari)
+function unaLettera(a, b) {
+  if (Math.abs(a.length - b.length) > 1) return false;
+  if (a.length > b.length) [a, b] = [b, a];
+  let i = 0, j = 0, d = 0;
+  while (i < a.length && j < b.length) {
+    if (a[i] !== b[j]) { if (++d > 1) return false; if (a.length === b.length) i++; j++; }
+    else { i++; j++; }
+  }
+  return d + (b.length - j) <= 1;
+}
+
+// ---------------- CONTROLLI ----------------
+function eseguiControlli(dati) {
+  const C = [];
+
+  // 1. Stesso volume, dati diversi
+  {
+    const campi = ['autore_curatore_volume', 'luogo', 'editore', 'anno'];
+    const gruppi = raggruppa(dati.filter(d => d.titolo_volume), d => chiave(d.titolo_volume));
+    const out = [];
+    for (const g of gruppi.values()) {
+      if (g.length < 2) continue;
+      const diversi = campi.filter(c => new Set(g.map(d => spazi(d[c]))).size > 1);
+      if (diversi.length) out.push({ titolo: g[0].titolo_volume, righe: g, evidenzia: diversi });
+    }
+    C.push({ id: 'volumi', nome: 'Stesso volume, dati diversi', priorita: 'alta', gruppi: out,
+      colonne: ['tipologia', 'autore_saggio', 'autore_curatore_volume', 'luogo', 'editore', 'anno'],
+      spiega: 'Un volume compare in più righe (la scheda del volume e i singoli saggi): curatore, luogo, editore e anno dovrebbero essere identici in tutte. È il controllo più utile contro gli errori di trascinamento o di completamento automatico: se in una sola riga il curatore è diverso, quasi sempre è un errore. Attenzione anche all\'ordine dei curatori e agli spazi doppi.' });
+  }
+
+  // 2. Stesso fascicolo di rivista, anni diversi
+  {
+    const r = dati.filter(d => d.tipologia === 'articolo in rivista' && d.rivista && (d.annata || d.fascicolo));
+    const gruppi = raggruppa(r, d => chiave(d.rivista) + '|' + chiave(d.annata) + '|' + chiave(d.fascicolo));
+    const out = [];
+    for (const g of gruppi.values())
+      if (g.length > 1 && new Set(g.map(d => d.anno)).size > 1)
+        out.push({ titolo: `${g[0].rivista}, ${g[0].annata}${g[0].fascicolo ? ', fasc. ' + g[0].fascicolo : ''}`, righe: g, evidenzia: ['anno'] });
+    C.push({ id: 'riviste', nome: 'Stesso fascicolo di rivista, anni diversi', priorita: 'alta', gruppi: out,
+      colonne: ['autore_saggio', 'titolo_saggio', 'annata', 'fascicolo', 'anno'],
+      spiega: 'Articoli della stessa rivista, stessa annata e stesso fascicolo dovrebbero avere lo stesso anno. Un anno che "sale" di uno in righe consecutive è tipico del trascinamento in Excel.' });
+  }
+
+  // 3 e 4. Nomi
+  {
+    const conta = new Map();
+    for (const d of dati) for (const campo of ['autore_saggio', 'autore_curatore_volume'])
+      for (const n of (d[campo] || '').split(/\s+-\s+/)) {
+        const nome = n.trim(); if (!nome) continue;
+        if (!conta.has(nome)) conta.set(nome, []);
+        conta.get(nome).push(d);
+      }
+    const perChiave = raggruppa([...conta.keys()], chiaveNome);
+    const grafie = [];
+    for (const nomi of perChiave.values()) if (nomi.length > 1) grafie.push(nomi);
+    const chiavi = [...perChiave.keys()];
+    const blocchi = raggruppa(chiavi, k => k.slice(0, 3));
+    const simili = [];
+    for (const b of blocchi.values())
+      for (let i = 0; i < b.length; i++) for (let j = i + 1; j < b.length; j++)
+        if (b[i].length >= 8 && unaLettera(b[i], b[j])) simili.push([perChiave.get(b[i])[0], perChiave.get(b[j])[0]]);
+    // Si elencano solo le righe con le forme meno frequenti (quelle probabilmente da correggere)
+    const comeGruppi = lista => lista.map(nomi => {
+      const ord = [...nomi].sort((a, b) => conta.get(b).length - conta.get(a).length);
+      return { titolo: ord.map(n => `«${n}» (${conta.get(n).length} righe)`).join('  ↔  '),
+               righe: ord.slice(1).flatMap(n => conta.get(n)), evidenzia: [], nomiRari: ord.slice(1) };
+    });
+    C.push({ id: 'grafie', nome: 'Stesso nome scritto in modi diversi', priorita: 'media', gruppi: comeGruppi(grafie),
+      colonne: ['tipologia', 'autore_saggio', 'autore_curatore_volume', 'titolo'],
+      spiega: 'Lo stesso nome con virgola mancante, spazi in più, maiuscole o accenti diversi (es. «Del Negro Piero» / «Del Negro, Piero»). Nella ricerca e nell\'ordinamento risultano come persone diverse: va uniformata la grafia (Cognome, Nome). Sotto sono elencate solo le righe con la forma meno frequente.' });
+    C.push({ id: 'simili', nome: 'Nomi che differiscono per una sola lettera', priorita: 'media', gruppi: comeGruppi(simili),
+      colonne: ['tipologia', 'autore_saggio', 'autore_curatore_volume', 'titolo'],
+      spiega: 'Possibili refusi (es. «Pecorai» / «Pecorari»). Alcuni sono persone davvero diverse (es. «Rossi, Paolo» / «Rosso, Paolo»). La forma più frequente è indicata per prima; sotto sono elencate solo le righe con la forma meno frequente, che di solito è il refuso.' });
+  }
+
+  // 5. Campi non adatti alla tipologia
+  {
+    const t = d => d.tipologia;
+    const regole = [
+      ['Tipologia mancante o non riconosciuta', d => !TIPOLOGIE.includes(t(d))],
+      ['Anno mancante o non valido', d => !/^(1[5-9]|20)\d\d/.test(d.anno)],
+      ['Articolo in rivista senza nome della rivista', d => t(d) === 'articolo in rivista' && !d.rivista],
+      ['Articolo in rivista con un titolo di volume', d => t(d) === 'articolo in rivista' && d.titolo_volume],
+      ['Saggio senza autore del saggio', d => t(d).startsWith('articolo') && !d.autore_saggio],
+      ['Saggio senza titolo del saggio', d => t(d).startsWith('articolo') && !d.titolo_saggio],
+      ['Saggio in volume senza titolo del volume', d => t(d) === 'articolo in volume miscellaneo' && !d.titolo_volume],
+      ['Monografia o poligrafia con autore/titolo di un saggio', d => ['monografia', 'poligrafia'].includes(t(d)) && (d.autore_saggio || d.titolo_saggio)],
+      ['Monografia o poligrafia senza titolo del volume', d => ['monografia', 'poligrafia'].includes(t(d)) && !d.titolo_volume]
+    ];
+    const out = [];
+    for (const [nome, fn] of regole) { const r = dati.filter(fn); if (r.length) out.push({ titolo: nome, righe: r, evidenzia: [] }); }
+    C.push({ id: 'tipologia', nome: 'Campi mancanti o non adatti alla tipologia', priorita: 'alta', gruppi: out,
+      colonne: ['tipologia', 'autore_saggio', 'titolo_saggio', 'autore_curatore_volume', 'titolo_volume', 'rivista', 'anno'],
+      spiega: 'Righe in cui manca un dato obbligatorio per quella tipologia, o in cui un dato è finito nella colonna sbagliata (spesso succede spostando o incollando celle).' });
+  }
+
+  // 6. Righe identiche
+  {
+    const gruppi = raggruppa(dati, d => COLONNE.map(c => chiave(d[c])).join('|'));
+    const out = [...gruppi.values()].filter(g => g.length > 1).map(g => ({ titolo: titoloDi(g[0]), righe: g, evidenzia: [] }));
+    C.push({ id: 'duplicati', nome: 'Righe duplicate', priorita: 'media', gruppi: out,
+      colonne: ['tipologia', 'autore', 'titolo', 'sede', 'anno'],
+      spiega: 'Righe con gli stessi dati in tutte le colonne. Di solito una delle due va cancellata.' });
+  }
+
+  // 7. Curatore senza "a cura di"
+  {
+    const r = dati.filter(d => ['articolo in volume miscellaneo', 'poligrafia'].includes(d.tipologia) && d.autore_curatore_volume && !d.precisazione_curatore);
+    const gruppi = raggruppa(r, d => chiave(d.titolo_volume));
+    const out = [...gruppi.values()].map(g => ({ titolo: g[0].titolo_volume, righe: g, evidenzia: ['autore_curatore_volume'] }));
+    C.push({ id: 'curatela', nome: 'Volumi collettanei con un nome ma senza "a cura di"', priorita: 'bassa', gruppi: out,
+      colonne: ['tipologia', 'autore_saggio', 'autore_curatore_volume', 'precisazione_curatore'],
+      spiega: 'Il nome nella colonna del curatore non è accompagnato da "a cura di". Può essere corretto (volume di un unico autore), ma è proprio il caso in cui un nome finito lì per errore passa inosservato: verificare che quella persona sia davvero curatore o autore del volume.' });
+  }
+  return C;
+}
+
+// ---------------- VISUALIZZAZIONE ----------------
+const ETICHETTE = { tipologia: 'Tipologia', autore_saggio: 'Autore saggio', titolo_saggio: 'Titolo saggio', autore_curatore_volume: 'Autore/curatore volume',
+  precisazione_curatore: 'Precisazione', titolo_volume: 'Titolo volume', luogo: 'Luogo', editore: 'Editore', anno: 'Anno', rivista: 'Rivista',
+  annata: 'Annata', fascicolo: 'Fascicolo', autore: 'Autore', titolo: 'Titolo', sede: 'Volume / rivista' };
+const valore = (d, c) => c === 'autore' ? autoreDi(d) : c === 'titolo' ? titoloDi(d) : c === 'sede' ? sedeDi(d) : d[c];
+
+function mostra(controlli, totale) {
+  const conta = c => c.gruppi.reduce((s, g) => s + g.righe.length, 0);
+  document.getElementById('riepilogo').innerHTML =
+    `<span class="pill">Record letti: <b>${totale}</b></span>` +
+    `<span class="pill">Righe da verificare: <b>${new Set(controlli.flatMap(c => c.gruppi.flatMap(g => g.righe.map(r => r._riga)))).size}</b></span>` +
+    `<button onclick="scaricaRapporto()">⬇ Scarica il rapporto completo (CSV per Excel)</button>`;
+  document.getElementById('controlli').innerHTML = controlli.map(c => {
+    const n = conta(c);
+    let mostrate = 0, corpo = '';
+    for (const g of c.gruppi) {
+      if (mostrate >= MAX_RIGHE) break;
+      // valore più frequente di ogni colonna del gruppo: si evidenzia solo chi se ne discosta
+      const moda = {};
+      for (const col of g.evidenzia) {
+        const f = new Map(); g.righe.forEach(d => { const v = spazi(d[col]); f.set(v, (f.get(v) || 0) + 1); });
+        const top = [...f.entries()].sort((a, b) => b[1] - a[1]);
+        moda[col] = top.length > 1 && top[0][1] === top[1][1] ? null : top[0][0];  // in parità si evidenziano tutti
+      }
+      const evid = (d, col) => {
+        if (g.nomiRari) return ['autore_saggio', 'autore_curatore_volume'].includes(col) && (d[col] || '').split(/\s+-\s+/).some(n => g.nomiRari.includes(n.trim()));
+        if (!g.evidenzia.includes(col)) return false;
+        return moda[col] === null || spazi(d[col]) !== moda[col];
+      };
+      corpo += `<tr class="gruppo"><td colspan="${c.colonne.length + 1}">${esc(g.titolo)}</td></tr>`;
+      for (const d of g.righe) {
+        corpo += `<tr><td class="riga">${d._riga}</td>` + c.colonne.map(col =>
+          `<td class="${evid(d, col) ? 'diff' : ''}">${esc(valore(d, col))}</td>`).join('') + '</tr>';
+        mostrate++;
+      }
+    }
+    const resto = n > mostrate ? `<p class="altro">Mostrate ${mostrate} righe su ${n}: le altre sono nel rapporto scaricabile.</p>` : '';
+    return `<details class="${n ? '' : 'zero'}">
+      <summary><span>${esc(c.nome)}<span class="priorita">priorità ${c.priorita}</span></span>
+      <span class="n">${n ? `${c.gruppi.length} casi · ${n} righe` : '✓ nessuna segnalazione'}</span></summary>
+      <p class="spiega">${esc(c.spiega)}</p>
+      ${n ? `<div class="tab-wrap"><table><tr><th>Riga</th>${c.colonne.map(col => `<th>${ETICHETTE[col]}</th>`).join('')}</tr>${corpo}</table></div>${resto}` : ''}
+    </details>`;
+  }).join('');
+}
+
+let CONTROLLI = [];
+function scaricaRapporto() {
+  const q = s => '"' + String(s ?? '').replace(/"/g, '""') + '"';
+  let csv = ['controllo', 'priorita', 'caso', 'riga', 'tipologia', 'autore', 'titolo', 'curatore_volume', 'volume_o_rivista', 'anno'].join(';') + '\r\n';
+  for (const c of CONTROLLI) for (const g of c.gruppi) for (const d of g.righe)
+    csv += [c.nome, c.priorita, g.titolo, d._riga, d.tipologia, autoreDi(d), titoloDi(d), d.autore_curatore_volume, sedeDi(d), d.anno].map(q).join(';') + '\r\n';
+  const a = document.createElement('a');
+  a.href = URL.createObjectURL(new Blob(['﻿' + csv], { type: 'text/csv;charset=utf-8' }));
+  a.download = 'controllo_bibliografia_' + new Date().toISOString().slice(0, 10) + '.csv';
+  document.body.appendChild(a); a.click(); a.remove();
+}
+
+(async function () {
+  try {
+    const res = await fetch(CSV_FILE + '?v=' + Date.now(), { cache: 'no-store' });
+    if (!res.ok) throw new Error(`Il file ${CSV_FILE} non è stato trovato nel repository.`);
+    const r = parseCSV(decodificaTesto(await res.arrayBuffer()));
+    if (r.mancanti.length) throw new Error('Nel CSV mancano le colonne: ' + r.mancanti.join(', '));
+    CONTROLLI = eseguiControlli(r.dati);
+    mostra(CONTROLLI, r.dati.length);
+  } catch (e) {
+    document.getElementById('riepilogo').innerHTML = `<div class="error">⚠️ ${esc(e.message)}</div>`;
+  }
+})();
+</script>
+</body>
+</html>
