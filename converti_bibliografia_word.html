@@ -1,0 +1,382 @@
+<!DOCTYPE html>
+<html lang="it">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Convertitore Word → Excel</title>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/jszip/3.10.1/jszip.min.js"></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/xlsx/0.18.5/xlsx.full.min.js"></script>
+<style>
+:root{--rosso:#9d2235;--rosso-scuro:#7a1a29;--testo:#222;--grigio:#666;--bordo:#ddd;--sfondo:#f5f5f5;--carta:#fff;--evid:#fff3c4;--ok:#2e7d32}
+*{box-sizing:border-box;margin:0;padding:0}
+body{font-family:Georgia,'Times New Roman',serif;background:var(--sfondo);color:var(--testo);line-height:1.45}
+.container{max-width:1200px;margin:0 auto;background:var(--carta);min-height:100vh;box-shadow:0 2px 8px rgba(0,0,0,.1)}
+.header{background:var(--rosso);color:#fff;padding:20px 30px;border-bottom:3px solid var(--rosso-scuro);display:flex;justify-content:space-between;align-items:center;flex-wrap:wrap;gap:12px}
+.header .centro{font-size:.8em;opacity:.9;letter-spacing:.5px}
+.header h1{font-size:1.5em;font-weight:normal}
+.header a{background:#fff;color:var(--rosso);padding:8px 16px;text-decoration:none;border-radius:4px;font-size:13px;font-weight:600}
+main{padding:24px 30px}
+h2{font-size:1.1em;font-weight:normal;color:var(--rosso);margin:22px 0 8px}
+.intro{color:var(--grigio);font-size:.92em;max-width:840px}
+.intro ul{margin:8px 0 0 20px}
+.intro li{margin-bottom:3px}
+.drop{display:block;margin-top:18px;border:2px dashed var(--bordo);border-radius:6px;padding:34px 20px;text-align:center;cursor:pointer;transition:background .2s,border-color .2s}
+.drop:hover,.drop.over{border-color:var(--rosso);background:#fbf6f6}
+.drop b{color:var(--rosso)}
+.drop small{display:block;color:var(--grigio);margin-top:6px}
+input[type=file]{display:none}
+.riepilogo{display:flex;gap:12px;flex-wrap:wrap;align-items:center;margin:18px 0}
+.pill{border:1px solid var(--bordo);padding:8px 14px;border-radius:4px;font-size:.9em}
+.pill b{color:var(--rosso)}
+button{font-family:inherit;background:var(--rosso);color:#fff;border:0;padding:10px 18px;border-radius:4px;cursor:pointer;font-size:.92em}
+button:hover{background:var(--rosso-scuro)}
+.tab-wrap{overflow-x:auto;border:1px solid var(--bordo);max-height:70vh}
+table{border-collapse:collapse;width:100%;font-size:.8em}
+th,td{border-bottom:1px solid #eee;padding:5px 7px;text-align:left;vertical-align:top}
+th{background:#faf7f7;font-weight:600;white-space:nowrap;position:sticky;top:0}
+tr.dubbio td{background:var(--evid)}
+td.motivo{color:var(--rosso);font-style:italic}
+.error{padding:14px;border:1px solid var(--rosso);color:var(--rosso);margin-top:16px}
+.nascosto{display:none}
+@media (max-width:640px){.header,main{padding:16px}}
+</style>
+</head>
+<body>
+<div class="container">
+  <div class="header">
+    <div><div class="centro">Centro Interuniversitario per la Storia delle Università Italiane</div>
+    <h1>Convertitore bibliografia Word → Excel</h1></div>
+    <a href="bibliografia_ricercabile_completo.html">← Torna alla bibliografia</a>
+  </div>
+  <main>
+    <div class="intro">
+      <p>Trasforma una bibliografia scritta in Word (citazioni in testo libero) nel file Excel a 15 colonne della bibliografia CISUI.
+      Il file resta sul tuo computer: la conversione avviene interamente nel browser.</p>
+      <ul>
+        <li>Il documento deve avere una citazione per paragrafo e le intestazioni per anno (es. «2025») su una riga a sé: il testo prima della prima intestazione viene ignorato.</li>
+        <li>Il <b>titolo deve essere in corsivo</b>: è ciò che permette di separarlo da autori ed editore.</li>
+        <li>Forme riconosciute: <i>in «Rivista»</i>, <i>in</i> + titolo del volume in corsivo, <i>a cura di</i> / <i>edited by</i> / <i>sous la direction de</i> / <i>(dir.)</i>.</li>
+        <li>Le righe in giallo vanno controllate: il motivo è indicato nella colonna «da_verificare».</li>
+      </ul>
+    </div>
+
+    <label class="drop" id="drop">
+      <b>Clicca qui per scegliere il file Word</b> oppure trascinalo in questo riquadro
+      <small>Formato .docx (se il file è .doc, aprirlo in Word e salvarlo come .docx)</small>
+      <input type="file" id="file" accept=".docx">
+    </label>
+    <div id="errore"></div>
+
+    <div id="risultato" class="nascosto">
+      <div class="riepilogo" id="riepilogo"></div>
+      <h2>Anteprima</h2>
+      <div class="tab-wrap"><table id="anteprima"></table></div>
+    </div>
+  </main>
+</div>
+
+<script>
+const COLONNE = ['tipologia','autore_saggio','precisazione_autore','titolo_saggio','autore_curatore_volume','precisazione_curatore','titolo_volume','luogo','editore','anno','volumi','rivista','annata','fascicolo','pagine'];
+const EXTRA = ['note','da_verificare','testo_originale'];
+const PARTICELLE = new Set(['de','del','della','delle','dei','degli','di','da','dal','dalla','van','von','der','du','le','la','lo','y','i','dos','das','do']);
+const ANNO = '\\d{4}(?:\\s*[-–]\\s*\\d{4})?';
+const RE_ANNO_INTERO = new RegExp('^' + ANNO + '$');
+const W = 'http://schemas.openxmlformats.org/wordprocessingml/2006/main';
+
+// ---------- utilità di testo (equivalenti delle funzioni Python) ----------
+const strip = (s, chars = ' \t\n') => { let a = 0, b = s.length; while (a < b && chars.includes(s[a])) a++; while (b > a && chars.includes(s[b - 1])) b--; return s.slice(a, b); };
+const senzaTag = t => t.replace(/[⟨⟩]/g, '').trim();
+const chiave = t => senzaTag(t).toLowerCase().normalize('NFD').replace(/[^\x00-\x7f]/g, '').replace(/[^a-z0-9]/g, '');
+const fine = m => m.index + m[0].length;
+const unici = arr => [...new Set(arr)];
+
+// ---------- lettura del .docx ----------
+function eCorsivo(run) {
+  const rPr = run.getElementsByTagNameNS(W, 'rPr')[0];
+  if (!rPr) return false;
+  const i = [...rPr.childNodes].find(n => n.localName === 'i');
+  if (!i) return false;
+  const v = i.getAttributeNS(W, 'val');
+  return !(v === '0' || v === 'false');
+}
+function testoRun(run) {
+  let t = '';
+  for (const n of run.childNodes) {
+    if (n.localName === 't') t += n.textContent;
+    else if (n.localName === 'tab') t += '\t';
+    else if (n.localName === 'br' || n.localName === 'cr') t += '\n';
+  }
+  return t;
+}
+function dentroCancellazione(n) {
+  for (let p = n.parentNode; p; p = p.parentNode) if (p.localName === 'del') return true;
+  return false;
+}
+function paragrafi(xml) {
+  const doc = new DOMParser().parseFromString(xml, 'application/xml');
+  return [...doc.getElementsByTagNameNS(W, 'p')].map(p => {
+    const runs = [...p.getElementsByTagNameNS(W, 'r')].filter(r => !dentroCancellazione(r));
+    let piano = '', marcato = '';
+    for (const r of runs) {
+      const t = testoRun(r);
+      if (!t) continue;
+      piano += t;
+      marcato += (eCorsivo(r) && t.trim()) ? '⟨' + t + '⟩' : t;
+    }
+    marcato = marcato.replace(/⟩(\s*)⟨/g, '$1').replace(/⟨([\s,.;:]+)/g, '$1⟨').replace(/(\s+)⟩/g, '⟩$1');
+    return { piano, marcato };
+  });
+}
+function ripulisci(t) {
+  t = t.replace(/\t/g, ' ').replace(/ /g, ' ');
+  t = t.replace(/([\p{L}\p{N}_])-\s*\n\s*([\p{L}\p{N}_])/gu, '$1$2');
+  t = t.replace(/([a-zà-ÿ])- ([a-zà-ÿ])/g, '$1$2');
+  t = t.replace(/\s*\n\s*/g, ' ').replace(/⟨⟩/g, '').replace(/ {2,}/g, ' ');
+  return t.trim();
+}
+function leggiCitazioni(pars) {
+  const out = []; let annoSezione = '', buffer = null;
+  for (const p of pars) {
+    const testo = p.piano.trim();
+    if (!testo) continue;
+    if (/^\d{4}$/.test(testo)) { annoSezione = testo; continue; }
+    if (!annoSezione) continue;
+    let m = p.marcato;
+    if (buffer !== null) { m = strip(strip(buffer).replace(/-+$/, '')) + m.replace(/^\s+/, ''); buffer = null; }
+    if (/-\s*⟩?\s*$/.test(m) && !/pp\.|\d{4}\s*$/.test(m)) { buffer = m.replace(/-(\s*⟩?)\s*$/, '$1'); continue; }
+    out.push([ripulisci(m), annoSezione]);
+  }
+  return out;
+}
+
+// ---------- nomi ----------
+function invertiNome(n) {
+  n = strip(n.trim(), ',');
+  if (!n || n.includes(',')) return [n, false];
+  const parole = n.split(/\s+/);
+  if (parole.length === 1) return [n, true];
+  let inizio = parole.length - 1;
+  for (let k = 0; k < parole.length; k++) {
+    const w = parole[k];
+    if (k > 0 && PARTICELLE.has(w.toLowerCase()) && w[0] === w[0].toLowerCase() && w[0] !== w[0].toUpperCase()) {
+      inizio = k - 1 > 0 ? k - 1 : k; break;
+    }
+  }
+  return [`${parole.slice(inizio).join(' ')}, ${parole.slice(0, inizio).join(' ')}`, parole.length > 2];
+}
+function curatori(testo) {
+  let altro = '';
+  const m = testo.match(/,?\s*(con\s.+)$/);
+  if (m) { altro = senzaTag(m[1]); testo = testo.slice(0, m.index); }
+  const nomi = senzaTag(testo).split(/,\s*|\s+e\s+|\s+and\s+|\s*&\s*/).filter(x => x.trim());
+  const inv = nomi.map(invertiNome);
+  return [inv.map(x => x[0]).join(' - '), inv.some(x => x[1]), altro];
+}
+function separaAutoriTitolo(testa) {
+  if (testa.startsWith('⟨')) return ['', testa];
+  const i = testa.indexOf('⟨');
+  let prefisso = i < 0 ? testa : testa.slice(0, i), resto = i < 0 ? '' : testa.slice(i);
+  const persone = prefisso.split(' - ');
+  const ultima = persone[persone.length - 1].split(', ');
+  let nomeUltima = strip(ultima.slice(0, 2).join(', '), ' ,');
+  const titoloExtra = ultima.slice(2).join(', ').trim();
+  if (!nomeUltima.includes(',') && !titoloExtra) {
+    const m = resto.match(/^⟨((?:[A-ZÀ-Ý][\p{L}\p{N}_.'’-]*\s?){1,3}),\s*/u);
+    if (m) { nomeUltima = `${nomeUltima}, ${m[1].trim()}`; resto = '⟨' + resto.slice(fine(m)); }
+  }
+  const autori = [...persone.slice(0, -1).map(p => p.trim()), nomeUltima].join(' - ');
+  const titolo = titoloExtra ? (titoloExtra + ' ' + resto).trim() : resto;
+  return [autori, titolo];
+}
+
+// ---------- parti finali ----------
+function estraiCoda(coda) {
+  let doi = '', pagine = '', volumi = '', m;
+  if ((m = coda.match(/,?\s*(DOI:?\s*\S+|https?:\/\/\S+)\s*$/))) { doi = m[1]; coda = coda.slice(0, m.index); }
+  if ((m = coda.match(/,?\s*pp?\.\s*(.+?)\s*$/))) { pagine = m[1]; coda = coda.slice(0, m.index); }
+  if ((m = coda.match(/,?\s*(\d+)\s*voll?\.\s*$/))) { volumi = m[1]; coda = coda.slice(0, m.index); }
+  if ((m = coda.match(/,?\s*vol\.\s*(\S+?)\s*$/)) && !volumi) { volumi = m[1]; coda = coda.slice(0, m.index); }
+  return [strip(coda, ' ,.'), pagine, volumi, doi];
+}
+function parseVolume(dopoTitolo) {
+  let [coda, pagine, volumi, doi] = estraiCoda(dopoTitolo);
+  const r = { pagine, volumi, note: doi, extra: '', curatori: '', precisazione: '', luogo: '', editore: '', anno: '', dubbi: [] };
+  let m = coda.match(new RegExp(',?\\s*(' + ANNO + ')\\s*$'));
+  if (m) { r.anno = m[1].replace(/ /g, ''); coda = coda.slice(0, m.index); } else r.dubbi.push('anno non trovato');
+  const md = coda.match(/(?:,\s*|^)([^,]+?)\s*\((?:dir|dirs|ed|eds|hrsg|a cura di)\.?\)/i);
+  if (md) coda = coda.slice(0, md.index) + ', a cura di ' + md[1] + coda.slice(fine(md));
+  m = coda.match(/(?:,\s*|^)(a cura di|edited by|ed\. by|edición de|hrsg\. von|éd\. par|sous la direction de)\s+/i);
+  if (m) {
+    const prima = coda.slice(0, m.index), parti = coda.slice(fine(m)).split(', ').map(x => x.trim());
+    let nomi;
+    if (parti.length >= 3) { r.luogo = parti[parti.length - 2]; r.editore = parti[parti.length - 1]; nomi = parti.slice(0, -2).join(', '); }
+    else { nomi = parti.join(', '); r.dubbi.push('luogo/editore non trovati'); }
+    const [c, dubbio, altro] = curatori(nomi);
+    r.curatori = c; r.precisazione = 'a cura di';
+    if (dubbio) r.dubbi.push('controllare cognome dei curatori');
+    if (altro) r.precisazione += ` (${altro})`;
+    r.extra = prima;
+  } else {
+    const parti = coda ? coda.split(', ').map(x => x.trim()) : [];
+    if (parti.length >= 2) { r.luogo = parti[parti.length - 2]; r.editore = parti[parti.length - 1]; r.extra = parti.slice(0, -2).join(', '); }
+    else if (parti.length) { r.editore = parti[0]; r.dubbi.push('luogo non trovato'); }
+  }
+  r.extra = r.extra.replace(/^[\s,.]+|[\s,]+$/g, '');
+  if (r.extra === r.anno) r.extra = '';
+  return r;
+}
+function unisciTitolo(titolo, extra) {
+  titolo = senzaTag(titolo).replace(/[ ,]+$/, '');
+  if (extra) titolo += (/[.:;!?]$/.test(titolo) ? ' ' : '. ') + senzaTag(extra);
+  return titolo;
+}
+
+// ---------- singola citazione ----------
+function converti(cit, annoSezione) {
+  const rec = Object.fromEntries([...COLONNE, 'note'].map(c => [c, '']));
+  const dubbi = [];
+  let m = cit.match(/,\s*in\s+«/);
+  if (m) {                                                    // articolo in rivista
+    rec.tipologia = 'articolo in rivista';
+    const [autori, titolo] = separaAutoriTitolo(cit.slice(0, m.index));
+    rec.autore_saggio = autori; rec.titolo_saggio = senzaTag(titolo);
+    const resto = cit.slice(fine(m) - 1), j = resto.indexOf('»');
+    rec.rivista = senzaTag(resto.slice(0, j + 1));
+    let [coda, pagine, , doi] = estraiCoda(resto.slice(j + 1));
+    rec.pagine = pagine; rec.note = doi;
+    coda = strip(coda, ' ,');
+    const pezzi = coda.split(',').map(x => x.trim()).filter(Boolean);
+    const pos = pezzi.map((x, k) => RE_ANNO_INTERO.test(x) ? k : -1).filter(k => k >= 0);
+    if (pos.length) {
+      const k = pos[pos.length - 1];
+      rec.anno = pezzi[k].replace(/ /g, '');
+      if (pezzi.slice(k + 1).length && !rec.pagine) rec.pagine = pezzi.slice(k + 1).join(', ');
+      coda = pezzi.slice(0, k).join(', ');
+    } else { rec.anno = annoSezione; dubbi.push("anno preso dall'intestazione di sezione"); }
+    const numeri = coda.split(',').map(x => x.trim()).filter(Boolean);
+    if (numeri.length) {
+      if (numeri[0].includes('/')) { const s = numeri[0].indexOf('/'); rec.annata = numeri[0].slice(0, s); rec.fascicolo = numeri[0].slice(s + 1); }
+      else { rec.annata = numeri[0]; rec.fascicolo = numeri.slice(1).join(', '); }
+    }
+    return [rec, dubbi, null];
+  }
+  m = cit.match(/,\s*in\s+⟨/);
+  if (m) {                                                    // saggio in volume
+    rec.tipologia = 'articolo in volume miscellaneo';
+    const [autori, titolo] = separaAutoriTitolo(cit.slice(0, m.index));
+    rec.autore_saggio = autori; rec.titolo_saggio = senzaTag(titolo);
+    const resto = cit.slice(fine(m) - 1), j = resto.indexOf('⟩');
+    const titoloVol = resto.slice(1, j), dopo = resto.slice(j + 1);
+    const [coda, pagine, volumi, doi] = estraiCoda(dopo);
+    rec.pagine = pagine; rec.volumi = volumi; rec.note = doi;
+    if (strip(coda, ' ,.')) {
+      const v = parseVolume(dopo);
+      Object.assign(rec, { titolo_volume: unisciTitolo(titoloVol, v.extra), luogo: v.luogo, editore: v.editore, anno: v.anno,
+        autore_curatore_volume: v.curatori, precisazione_curatore: v.precisazione });
+      dubbi.push(...v.dubbi);
+      return [rec, dubbi, null];
+    }
+    rec.titolo_volume = senzaTag(titoloVol);
+    return [rec, dubbi, chiave(titoloVol)];
+  }
+  // volume: monografia o poligrafia
+  let [autori, titolo] = separaAutoriTitolo(cit);
+  if (!titolo.startsWith('⟨') && titolo.includes('⟨')) titolo = titolo.slice(titolo.indexOf('⟨'));
+  let j = titolo.indexOf('⟩');
+  if (j < 0) { dubbi.push('titolo in corsivo non trovato'); j = titolo.length; }
+  const v = parseVolume(titolo.slice(j + 1));
+  dubbi.push(...v.dubbi);
+  Object.assign(rec, { titolo_volume: unisciTitolo(titolo.slice(0, j + 1), v.extra), luogo: v.luogo, editore: v.editore,
+    anno: v.anno || annoSezione, volumi: v.volumi, pagine: v.pagine, note: v.note });
+  if (autori) {
+    rec.tipologia = 'monografia'; rec.autore_curatore_volume = autori;
+    if (v.curatori) dubbi.push('ha sia autori sia curatori');
+  } else {
+    rec.tipologia = 'poligrafia'; rec.autore_curatore_volume = v.curatori; rec.precisazione_curatore = v.precisazione;
+    if (!v.curatori) dubbi.push('volume senza autore né curatore');
+  }
+  return [rec, dubbi, null];
+}
+
+function convertiTutto(citazioni) {
+  const righe = citazioni.map(([cit, anno]) => {
+    let r;
+    try { r = converti(cit, anno); }
+    catch (e) { r = [Object.fromEntries([...COLONNE, 'note'].map(c => [c, ''])), [`non convertita (${e.message})`], null]; }
+    r[0].testo_originale = senzaTag(cit);
+    return r;
+  });
+  const volumi = new Map();
+  for (const [rec] of righe) if (['poligrafia', 'monografia'].includes(rec.tipologia)) volumi.set(chiave(rec.titolo_volume), rec);
+  for (const [rec, dubbi, rif] of righe) {
+    if (rif === null) continue;
+    const trovati = [...volumi].filter(([k]) => k.startsWith(rif)).map(([, v]) => v);
+    if (trovati.length === 1) for (const c of ['titolo_volume', 'autore_curatore_volume', 'precisazione_curatore', 'luogo', 'editore', 'anno']) rec[c] = trovati[0][c];
+    else dubbi.push('scheda del volume non trovata nel documento: completare curatore, luogo, editore, anno');
+  }
+  for (const [rec, dubbi] of righe) {
+    if (rec.tipologia.startsWith('articolo') && !rec.autore_saggio) dubbi.push('saggio senza autore');
+    for (const c of ['autore_saggio', 'autore_curatore_volume'])
+      for (const n of rec[c].split(' - ').filter(Boolean)) if (!n.includes(',')) dubbi.push(`nome senza virgola: ${n}`);
+    rec.da_verificare = unici(dubbi).join('; ');
+  }
+  return righe.map(r => r[0]);
+}
+
+// ---------- interfaccia ----------
+let RECORD = [], NOME = '';
+const esc = s => String(s ?? '').replace(/[&<>"]/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[c]));
+
+async function elabora(file) {
+  document.getElementById('errore').innerHTML = '';
+  document.getElementById('risultato').classList.add('nascosto');
+  try {
+    if (!/\.docx$/i.test(file.name)) throw new Error('Il file deve essere in formato .docx. Se è un .doc, aprilo in Word e salvalo come .docx.');
+    const zip = await JSZip.loadAsync(file);
+    const xml = await zip.file('word/document.xml')?.async('string');
+    if (!xml) throw new Error('Il file non sembra un documento Word valido.');
+    const citazioni = leggiCitazioni(paragrafi(xml));
+    if (!citazioni.length) throw new Error('Nessuna citazione trovata. Il documento deve contenere le intestazioni per anno (es. «2025») su una riga a sé, seguite dalle citazioni.');
+    RECORD = convertiTutto(citazioni);
+    NOME = file.name.replace(/\.docx$/i, '');
+    mostra();
+  } catch (e) {
+    document.getElementById('errore').innerHTML = `<div class="error">⚠️ ${esc(e.message)}</div>`;
+  }
+}
+
+function mostra() {
+  const perTipo = {};
+  RECORD.forEach(r => perTipo[r.tipologia] = (perTipo[r.tipologia] || 0) + 1);
+  const dubbi = RECORD.filter(r => r.da_verificare).length;
+  document.getElementById('riepilogo').innerHTML =
+    `<span class="pill">Citazioni convertite: <b>${RECORD.length}</b></span>` +
+    Object.entries(perTipo).map(([t, n]) => `<span class="pill">${esc(t)}: <b>${n}</b></span>`).join('') +
+    `<span class="pill">Da verificare: <b>${dubbi}</b></span>` +
+    `<button onclick="scarica()">⬇ Scarica il file Excel</button>`;
+  const cols = ['da_verificare', ...COLONNE, 'note'];
+  document.getElementById('anteprima').innerHTML =
+    `<tr><th>#</th>${cols.map(c => `<th>${c}</th>`).join('')}</tr>` +
+    RECORD.map((r, i) => `<tr class="${r.da_verificare ? 'dubbio' : ''}"><td>${i + 2}</td>${cols.map(c =>
+      `<td class="${c === 'da_verificare' ? 'motivo' : ''}">${esc(r[c])}</td>`).join('')}</tr>`).join('');
+  document.getElementById('risultato').classList.remove('nascosto');
+}
+
+function scarica() {
+  const intest = [...COLONNE, ...EXTRA];
+  const ws = XLSX.utils.aoa_to_sheet([intest, ...RECORD.map(r => intest.map(c => String(r[c] ?? '')))]);
+  ws['!cols'] = [24, 24, 10, 45, 26, 12, 45, 14, 22, 10, 8, 28, 8, 9, 10, 22, 40, 70].map(w => ({ wch: w }));
+  ws['!autofilter'] = { ref: ws['!ref'] };
+  const wb = XLSX.utils.book_new();
+  XLSX.utils.book_append_sheet(wb, ws, 'Bibliografia convertita');
+  XLSX.writeFile(wb, `${NOME}_convertita.xlsx`);
+}
+
+const drop = document.getElementById('drop'), input = document.getElementById('file');
+input.addEventListener('change', () => input.files[0] && elabora(input.files[0]));
+['dragenter', 'dragover'].forEach(ev => drop.addEventListener(ev, e => { e.preventDefault(); drop.classList.add('over'); }));
+['dragleave', 'drop'].forEach(ev => drop.addEventListener(ev, e => { e.preventDefault(); drop.classList.remove('over'); }));
+drop.addEventListener('drop', e => e.dataTransfer.files[0] && elabora(e.dataTransfer.files[0]));
+</script>
+</body>
+</html>
